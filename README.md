@@ -59,6 +59,15 @@ CoinJoin does not guarantee anonymity. Before using funds, read the
 [privacy practices](https://joinmarket-ng.github.io/joinmarket-ng/technical/best-practices/)
 and [backup requirements](https://joinmarket-ng.github.io/joinmarket-ng/recover-wallet/).
 
+## Dependencies
+
+Python dependencies are hash-pinned in each component's `requirements*.txt`. `python-bitcointx`
+comes from the maintained [m0wer fork](https://github.com/m0wer/python-bitcointx). It is temporarily
+pinned to an exact source revision of
+[PR #1](https://github.com/m0wer/python-bitcointx/pull/1) (MuSig2 support), because the published
+2.1.1 wheel does not include it. `scripts/update-bitcointx.py` moves the pin back to a release wheel
+once a newer release ships that support.
+
 ## Community
 
 - Telegram: https://t.me/joinmarketorg

@@ -32,12 +32,24 @@ PIN_RE = re.compile(
     rf"python_bitcointx-(?P<wheel_version>{VERSION_PATTERN})-py3-none-any\.whl"
     r"#sha256=(?P<digest>[a-f0-9]{64})"
 )
+# Temporary source pin for https://github.com/m0wer/python-bitcointx/pull/1, used
+# while the published wheel of SOURCE_PIN_VERSION lacks MuSig2 support. The sdist
+# behind the pin declares SOURCE_PIN_VERSION, so only a strictly newer published
+# release may replace it.
+SOURCE_PIN_VERSION = "2.1.1"
+SOURCE_PIN_RE = re.compile(
+    rf"https://codeload\.github\.com/{REPOSITORY}/tar\.gz/(?P<commit>[a-f0-9]{{40}})"
+    r"#sha256=(?P<source_digest>[a-f0-9]{64})"
+)
 TEST_VERSION_RE = re.compile(
     rf'(?m)^(BITCOINTX_VERSION = ")(?P<version>{VERSION_PATTERN})(")$'
 )
 TEST_DIGEST_RE = re.compile(
-    r'(?m)^(BITCOINTX_WHEEL_SHA256 = (?:\(\n    )?")'
+    r'(?m)^(BITCOINTX_SHA256 = (?:\(\n    )?")'
     r'(?P<digest>[a-f0-9]{64})("(?:\n\))?)$'
+)
+TEST_SOURCE_COMMIT_RE = re.compile(
+    r'(?m)^(BITCOINTX_SOURCE_COMMIT = ")(?P<commit>[a-f0-9]{40}|)(")$'
 )
 
 
@@ -55,9 +67,16 @@ class ReleasePin(NamedTuple):
         return f"{self.wheel_url}#sha256={self.sha256}"
 
 
+class CurrentPin(NamedTuple):
+    version: str
+    sha256: str
+    source_commit: str  # empty for release wheel pins
+
+
 class UpdateResult(NamedTuple):
     current_version: str
     changed_paths: tuple[Path, ...]
+    source_commit: str = ""
 
 
 def fetch_latest_release() -> dict[str, object]:
@@ -125,6 +144,34 @@ def _one_match(pattern: re.Pattern[str], text: str, path: Path) -> re.Match[str]
     return matches[0]
 
 
+def _current_pin(text: str, path: Path) -> tuple[CurrentPin, tuple[int, int]]:
+    """Return the single python-bitcointx pin in ``text`` and its span."""
+    wheel_matches = list(PIN_RE.finditer(text))
+    source_matches = list(SOURCE_PIN_RE.finditer(text))
+    if len(wheel_matches) + len(source_matches) != 1:
+        raise UpdateError(
+            f"Expected one python-bitcointx pin in {path}, "
+            f"found {len(wheel_matches) + len(source_matches)}"
+        )
+    if wheel_matches:
+        match = wheel_matches[0]
+        if match.group("tag_version") != match.group("wheel_version"):
+            raise UpdateError(f"Inconsistent python-bitcointx versions in {path}")
+        wheel_pin = CurrentPin(match.group("tag_version"), match.group("digest"), "")
+        return wheel_pin, match.span()
+    match = source_matches[0]
+    pin = CurrentPin(
+        SOURCE_PIN_VERSION, match.group("source_digest"), match.group("commit")
+    )
+    return pin, match.span()
+
+
+def _is_newer(candidate: str, current: str) -> bool:
+    return tuple(int(part) for part in candidate.split(".")) > tuple(
+        int(part) for part in current.split(".")
+    )
+
+
 def _atomic_write(path: Path, text: str) -> None:
     mode = path.stat().st_mode
     temporary_path: Path | None = None
@@ -143,36 +190,47 @@ def _atomic_write(path: Path, text: str) -> None:
 
 def update_sources(repo_root: Path, latest: ReleasePin) -> UpdateResult:
     prepared: dict[Path, str] = {}
-    current_pins: list[tuple[str, str]] = []
+    current_pins: list[CurrentPin] = []
 
     for relative_path in DIRECT_PIN_FILES:
         path = repo_root / relative_path
         text = path.read_text(encoding="utf-8")
-        match = _one_match(PIN_RE, text, relative_path)
-        tag_version = match.group("tag_version")
-        wheel_version = match.group("wheel_version")
-        if tag_version != wheel_version:
-            raise UpdateError(
-                f"Inconsistent python-bitcointx versions in {relative_path}"
-            )
-        current_pins.append((tag_version, match.group("digest")))
-        prepared[path] = PIN_RE.sub(latest.requirement_url, text, count=1)
+        pin, (start, end) = _current_pin(text, relative_path)
+        current_pins.append(pin)
+        prepared[path] = text[:start] + latest.requirement_url + text[end:]
 
     test_path = repo_root / SECURITY_TEST_PATH
     test_text = test_path.read_text(encoding="utf-8")
     version_match = _one_match(TEST_VERSION_RE, test_text, SECURITY_TEST_PATH)
     digest_match = _one_match(TEST_DIGEST_RE, test_text, SECURITY_TEST_PATH)
-    current_pins.append((version_match.group("version"), digest_match.group("digest")))
+    commit_match = _one_match(TEST_SOURCE_COMMIT_RE, test_text, SECURITY_TEST_PATH)
+    current_pins.append(
+        CurrentPin(
+            version_match.group("version"),
+            digest_match.group("digest"),
+            commit_match.group("commit"),
+        )
+    )
     updated_test_text = TEST_VERSION_RE.sub(
         rf"\g<1>{latest.version}\g<3>", test_text, count=1
     )
-    prepared[test_path] = TEST_DIGEST_RE.sub(
+    updated_test_text = TEST_DIGEST_RE.sub(
         rf"\g<1>{latest.sha256}\g<3>", updated_test_text, count=1
+    )
+    # Moving to a release wheel clears the temporary source revision.
+    prepared[test_path] = TEST_SOURCE_COMMIT_RE.sub(
+        r"\g<1>\g<3>", updated_test_text, count=1
     )
 
     if len(set(current_pins)) != 1:
         raise UpdateError("Existing python-bitcointx source pins are inconsistent")
-    current_version = current_pins[0][0]
+    current = current_pins[0]
+    current_version = current.version
+
+    if current.source_commit and not _is_newer(latest.version, current_version):
+        # The source pin carries fixes the published wheel of the same version
+        # lacks, so it is never replaced by an equal or older release.
+        return UpdateResult(current_version, (), current.source_commit)
 
     changed_paths = tuple(
         path
@@ -205,6 +263,11 @@ def main() -> int:
         print(
             f"Updated python-bitcointx {result.current_version} -> {latest.version} "
             f"in {len(result.changed_paths)} source files"
+        )
+    elif result.source_commit:
+        print(
+            f"python-bitcointx stays pinned to source {result.source_commit[:12]} "
+            f"({result.current_version}); release {latest.version} is not newer"
         )
     else:
         print(f"python-bitcointx is up to date ({latest.version})")

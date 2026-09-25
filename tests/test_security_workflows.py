@@ -30,9 +30,11 @@ PRODUCTION_LOCKS = {
 }
 BITCOINTX_PACKAGES = {"jmcore", "jmwallet", "jmwalletd"}
 BITCOINTX_VERSION = "2.1.1"
-BITCOINTX_WHEEL_SHA256 = (
-    "2f82999aa557da5f501bf10ca51dd830bcf16aba27ed8d976065c798454c11c6"
-)
+# Temporary source pin for https://github.com/m0wer/python-bitcointx/pull/1 (MuSig2),
+# which the published wheel of the same version lacks. Empty once a release wheel
+# ships the fix; scripts/update-bitcointx.py maintains both forms.
+BITCOINTX_SOURCE_COMMIT = "d352b79be1414d53a2a71da68ff220b0600cae37"
+BITCOINTX_SHA256 = "54ab6bc2f445c031317065701150ec81a87aae8c7e291cd10685b26be1b1a719"
 RUNTIME_IMAGE_STAGES = {
     "directory_server/Dockerfile": {"production", "debug"},
     "jmwalletd/Dockerfile": {"jmwalletd"},
@@ -169,23 +171,55 @@ def test_macos_uses_secp256k1_homebrew_formula() -> None:
     assert "brew install libsecp256k1" not in setup_action
 
 
-def test_bitcointx_dependency_is_pinned_to_release_wheel() -> None:
-    expected_url = (
-        "https://github.com/m0wer/python-bitcointx/releases/download/"
-        f"python-bitcointx-v{BITCOINTX_VERSION}/"
-        f"python_bitcointx-{BITCOINTX_VERSION}-py3-none-any.whl"
-    )
+def test_bitcointx_dependency_is_pinned_to_reviewed_artifact() -> None:
+    """Every manifest and lock must carry the same URL plus SHA-256, whether that
+    is a published release wheel or the reviewed source revision replacing it."""
+    if BITCOINTX_SOURCE_COMMIT:
+        expected_url = (
+            "https://codeload.github.com/m0wer/python-bitcointx/tar.gz/"
+            f"{BITCOINTX_SOURCE_COMMIT}"
+        )
+    else:
+        expected_url = (
+            "https://github.com/m0wer/python-bitcointx/releases/download/"
+            f"python-bitcointx-v{BITCOINTX_VERSION}/"
+            f"python_bitcointx-{BITCOINTX_VERSION}-py3-none-any.whl"
+        )
+    expected_pin = f"{expected_url}#sha256={BITCOINTX_SHA256}"
+
     for package in BITCOINTX_PACKAGES:
         manifest = (REPO_ROOT / package / "pyproject.toml").read_text(encoding="utf-8")
         assert "coincurve" not in manifest
-        assert expected_url in manifest
-        assert BITCOINTX_WHEEL_SHA256 in manifest
+        assert expected_pin in manifest
 
         for lock_name in ("requirements.txt", "requirements-dev.txt"):
             lock = (REPO_ROOT / package / lock_name).read_text(encoding="utf-8")
             assert "coincurve" not in lock
-            assert expected_url in lock
-            assert BITCOINTX_WHEEL_SHA256 in lock
+            assert expected_pin in lock
+            assert f"--hash=sha256:{BITCOINTX_SHA256}" in lock
+
+
+def test_bitcointx_standalone_scripts_document_the_same_pin() -> None:
+    """The standalone bond scripts are installed outside the locks, so their
+    documented pip command must match the pin the packages use."""
+    expected_pin = (
+        "https://codeload.github.com/m0wer/python-bitcointx/tar.gz/"
+        f"{BITCOINTX_SOURCE_COMMIT}#sha256={BITCOINTX_SHA256}"
+        if BITCOINTX_SOURCE_COMMIT
+        else (
+            "https://github.com/m0wer/python-bitcointx/releases/download/"
+            f"python-bitcointx-v{BITCOINTX_VERSION}/"
+            f"python_bitcointx-{BITCOINTX_VERSION}-py3-none-any.whl"
+            f"#sha256={BITCOINTX_SHA256}"
+        )
+    )
+    for script_name in (
+        "derive_bond_pubkey.py",
+        "sign_bond_cert_reference.py",
+        "sign_bond_mnemonic.py",
+    ):
+        script = (REPO_ROOT / "scripts" / script_name).read_text(encoding="utf-8")
+        assert expected_pin in script
 
 
 def test_main_and_release_promotions_depend_on_image_scans() -> None:
