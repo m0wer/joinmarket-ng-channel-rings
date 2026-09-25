@@ -11,6 +11,16 @@ does not move existing funds. If an older CLI created SegWit addresses despite
 an explicit `"p2tr"` setting, those funds remain on the BIP84 branch and can be
 accessed with a `"p2wpkh"` configuration.
 
+Fidelity bonds are different: both configurations derive new P2WSH bonds from
+`m/84'/coin'/0'/2/timenumber`, so the same seed and locktime identify the same
+bond in both pits. Switching the ordinary address type does not migrate bonds
+or reset their recovery markers. A known bond created under BIP86 by an older
+experimental Taproot build remains signable when its address and locktime match
+that seed's BIP86 key, including through a supplied PSBT. Keep the bond registry
+and its address/locktime records: automatic recovery still searches only the
+canonical BIP84 bond branch, and missing metadata does not trigger an additional
+BIP86 scan. No funded bond is moved or rewritten during this upgrade.
+
 ## Receiving Funds
 
 Reserve a new address before giving it to a payer. Mixdepth 0 is the normal
